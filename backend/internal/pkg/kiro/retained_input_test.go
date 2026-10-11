@@ -1,7 +1,6 @@
 package kiro
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"

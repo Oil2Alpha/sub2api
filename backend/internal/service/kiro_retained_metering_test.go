@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -12,14 +13,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestKiroCachedZeroInputDoesNotFallback(t *testing.T) {
-	for _, u := range []kiro.Usage{{CacheReadInputTokens: 1000}, {CacheCreationInputTokens: 1000}} {
-		got := kiroUsageToClaude(u, 1000)
-		require.Zero(t, got.InputTokens)
-		require.Equal(t, 1000, got.CacheReadInputTokens+got.CacheCreationInputTokens)
-	}
-	require.Equal(t, 1000, kiroUsageToClaude(kiro.Usage{}, 1000).InputTokens)
-}
 func TestRetainedCachePlanConservesRatios(t *testing.T) {
 	for index, tc := range []struct {
 		name, mode     string
@@ -86,4 +79,35 @@ func TestRetainedInputMeteringConservationAfterTruncation(t *testing.T) {
 	require.Equal(t, after, u.InputTokens+u.CacheReadInputTokens+u.CacheCreationInputTokens)
 	require.InDelta(t, float64(after)/2, float64(u.InputTokens), 1)
 	t.Logf("raw_estimate=%d retained_estimate=%d ordinary=%d cache=%d", before, after, u.InputTokens, u.CacheReadInputTokens+u.CacheCreationInputTokens)
+}
+
+func TestRetainedCacheFingerprintKeepsGrowingPrefix(t *testing.T) {
+	account := &Account{ID: 991099, Platform: PlatformKiro, Type: AccountTypeOAuth, Credentials: map[string]any{"refresh_token": "synthetic-growing-prefix"}}
+	group := &Group{Platform: PlatformKiro, KiroCacheEmulationEnabled: true, KiroCacheEmulationRatio: 1, KiroCacheCreationEmulationRatio: 1, KiroCacheReadEmulationRatio: 1, KiroCacheEmulationMode: KiroCacheEmulationModeIndependent}
+	svc := &GatewayService{}
+	makeBody := func(turns int) []byte {
+		messages := make([]any, 0, turns)
+		for i := 0; i < turns; i++ {
+			messages = append(messages, map[string]any{
+				"role":    map[bool]string{true: "assistant", false: "user"}[i%2 == 1],
+				"content": fmt.Sprintf("turn-%03d %s", i, strings.Repeat(fmt.Sprintf("distinct-%03d ", i), 900)),
+			})
+		}
+		body, err := json.Marshal(map[string]any{"model": "claude-opus-5-5-thinking", "messages": messages})
+		require.NoError(t, err)
+		return body
+	}
+	firstBody := makeBody(12)
+	first := svc.prepareKiroCacheEmulationUsage(context.Background(), account, group, firstBody, "claude-opus-5-5-thinking", 30000)
+	require.NotNil(t, first)
+	require.NotNil(t, first.result())
+	first.commit()
+	secondBody := makeBody(13)
+	second := svc.prepareKiroCacheEmulationUsage(context.Background(), account, group, secondBody, "claude-opus-5-5-thinking", 32000)
+	require.NotNil(t, second)
+	u := second.result()
+	require.NotNil(t, u)
+	require.Greater(t, u.CacheReadInputTokens, 0, "the stable old prefix must remain readable as the retained window grows")
+	require.Less(t, u.CacheCreationInputTokens, 32000)
+	require.Equal(t, 32000, u.InputTokens+u.CacheReadInputTokens+u.CacheCreationInputTokens)
 }

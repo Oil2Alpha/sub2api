@@ -136,7 +136,11 @@ func (s *GatewayService) streamKiroWebSearchAsAnthropic(
 		}
 		if len(requestCtx.RetainedInputBody) > 0 {
 			inputTokens = estimateKiroInputTokens(ctx, requestCtx.RetainedInputBody)
-			plan = s.rebuildRetainedKiroCachePlan(ctx, account, plan, requestCtx.RetainedInputBody, mappedModel, inputTokens)
+			cacheBody := requestCtx.CacheFingerprintBody
+			if len(cacheBody) == 0 {
+				cacheBody = requestCtx.RetainedInputBody
+			}
+			plan = s.rebuildRetainedKiroCachePlan(ctx, account, plan, cacheBody, mappedModel, inputTokens)
 		}
 		if iteration == 0 {
 			if err := writeAnthropicMessageStart(w, "", requestModel, inputTokens, plan.result()); err != nil {
@@ -214,8 +218,7 @@ func (s *GatewayService) executeKiroWebSearch(ctx context.Context, account *Acco
 	currentToolUseID := "srvtoolu_" + kiropkg.GenerateToolUseID()
 	searches := make([]kiropkg.SearchIndicator, 0, 2)
 	requestID := ""
-	var cacheUsage *kiroCacheEmulationUsage
-	cacheUsageResolved := false
+	var cachePlan *kiroCacheEmulationPlan
 
 	for iteration := 0; iteration < kiroMaxWebSearchIterations; iteration++ {
 		s.prefetchKiroWebSearchDescription(ctx, account, token)
@@ -248,17 +251,17 @@ func (s *GatewayService) executeKiroWebSearch(ctx context.Context, account *Acco
 
 		parseResult, parseErr := func() (*kiropkg.ParseResult, error) {
 			defer func() { _ = resp.Body.Close() }()
+			cacheBody := currentBody
 			if len(requestCtx.RetainedInputBody) > 0 {
 				inputTokens = estimateKiroInputTokens(ctx, requestCtx.RetainedInputBody)
-				cacheUsage = s.buildKiroCacheEmulationUsage(ctx, account, group, requestCtx.RetainedInputBody, mappedModel, inputTokens)
-				cacheUsageResolved = true
+				cacheBody = requestCtx.CacheFingerprintBody
+				if len(cacheBody) == 0 {
+					cacheBody = requestCtx.RetainedInputBody
+				}
 			}
-			if !cacheUsageResolved {
-				cacheUsage = s.buildKiroCacheEmulationUsage(ctx, account, group, anthropicBody, mappedModel, inputTokens)
-				cacheUsageResolved = true
-			}
+			cachePlan = s.prepareKiroCacheEmulationUsage(ctx, account, group, cacheBody, mappedModel, inputTokens)
 			return kiropkg.ParseNonStreamingEventStreamWithContext(resp.Body, requestModel, kiropkg.KiroRequestContext{
-				CacheEmulationUsage:  cacheUsage.toKiroUsage(),
+				CacheEmulationUsage:  cachePlan.result().toKiroUsage(),
 				EstimatedInputTokens: inputTokens,
 			})
 		}()
@@ -271,6 +274,9 @@ func (s *GatewayService) executeKiroWebSearch(ctx context.Context, account *Acco
 
 		nextToolUseID, nextQuery, hasNext := kiropkg.ExtractWebSearchToolUseFromResponse(parseResult.ResponseBody)
 		if !hasNext || strings.TrimSpace(nextQuery) == "" || iteration+1 >= kiroMaxWebSearchIterations {
+			// Only the final successful internal request is billed and committed.
+			// Intermediate rounds must not turn a discarded creation into a read.
+			cachePlan.commit()
 			finalBody, injectErr := kiropkg.InjectSearchIndicatorsInResponse(parseResult.ResponseBody, searches)
 			if injectErr == nil {
 				parseResult.ResponseBody = finalBody

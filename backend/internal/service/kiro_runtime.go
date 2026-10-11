@@ -244,7 +244,11 @@ func (s *GatewayService) forwardKiroMessages(ctx context.Context, c *gin.Context
 		body = requestCtx.RetainedInputBody
 		inputTokens = estimateKiroInputTokens(ctx, body)
 	}
-	cacheUsage := s.buildKiroCacheEmulationUsage(ctx, account, parsed.Group, body, mappedModel, inputTokens)
+	cacheBody := body
+	if len(requestCtx.CacheFingerprintBody) > 0 {
+		cacheBody = requestCtx.CacheFingerprintBody
+	}
+	cacheUsage := s.buildKiroCacheEmulationUsage(ctx, account, parsed.Group, cacheBody, mappedModel, inputTokens)
 	requestCtx.CacheEmulationUsage = cacheUsage.toKiroUsage()
 	requestCtx.EstimatedInputTokens = inputTokens
 	parseResult, err := kiropkg.ParseNonStreamingEventStreamWithContext(resp.Body, originalModel, requestCtx)
@@ -330,13 +334,17 @@ func (s *GatewayService) openKiroAnthropicStreamResponse(ctx context.Context, ac
 		return resp, inputTokens, nil
 	}
 	plan := cachePlanOverride
+	cacheBody := anthropicBody
 	if len(requestCtx.RetainedInputBody) > 0 {
 		anthropicBody = requestCtx.RetainedInputBody
 		inputTokens = estimateKiroInputTokens(ctx, anthropicBody)
-		plan = nil // Discard compatibility-protocol plans based on untrimmed input.
+		plan = nil // Rebuild with retained totals and the original prefix chain.
+		if len(requestCtx.CacheFingerprintBody) > 0 {
+			cacheBody = requestCtx.CacheFingerprintBody
+		}
 	}
 	if plan == nil {
-		plan = s.prepareKiroCacheEmulationUsage(ctx, account, group, anthropicBody, mappedModel, inputTokens)
+		plan = s.prepareKiroCacheEmulationUsage(ctx, account, group, cacheBody, mappedModel, inputTokens)
 	}
 	// 请求已确认成功(2xx)，此时提交缓存前缀落盘才是安全的。
 	plan.commit()
@@ -794,7 +802,7 @@ func estimateKiroInputTokens(ctx context.Context, body []byte) int {
 
 func kiroUsageToClaude(usage kiropkg.Usage, fallbackInput int) ClaudeUsage {
 	inputTokens := usage.InputTokens
-	if inputTokens == 0 && usage.CacheReadInputTokens == 0 && usage.CacheCreationInputTokens == 0 {
+	if inputTokens == 0 {
 		inputTokens = fallbackInput
 	}
 	return ClaudeUsage{

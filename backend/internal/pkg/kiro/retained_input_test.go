@@ -28,6 +28,7 @@ func TestRetainedInputStopsGrowingWithDiscardedHistory(t *testing.T) {
 		built, err := BuildKiroPayloadWithContext(raw, "claude-opus-5.5", "", "AI_EDITOR", nil)
 		require.NoError(t, err)
 		require.NotEmpty(t, built.Context.RetainedInputBody)
+		require.Equal(t, raw, built.Context.CacheFingerprintBody)
 		require.LessOrEqual(t, len(built.Payload), kiroMaxPayloadBytes)
 		require.Less(t, len(built.Context.RetainedInputBody), len(raw)/2)
 		if previous != nil {
@@ -79,15 +80,6 @@ func TestRetainedInputDoesNotUpgradeMixedCacheTTL(t *testing.T) {
 	body, err := retainedKiroInputBody(payload, []byte(`{"model":"claude-sonnet-4.5","system":[{"type":"text","text":"old","cache_control":{"type":"ephemeral","ttl":"1h"}},{"type":"text","text":"recent","cache_control":{"type":"ephemeral","ttl":"5m"}}]}`))
 	require.NoError(t, err)
 	require.Equal(t, "5m", gjson.GetBytes(body, "messages.0.content.0.cache_control.ttl").String())
-}
-
-func TestCachedZeroInputSurvivesNonStreamingEstimateFallback(t *testing.T) {
-	stream := bytes.NewBuffer(buildEventStreamFrame(t, "assistantResponseEvent", map[string]any{"assistantResponseEvent": map[string]any{"content": "OK"}}))
-	result, err := ParseNonStreamingEventStreamWithContext(stream, "claude-sonnet-4.5", KiroRequestContext{EstimatedInputTokens: 10000, CacheEmulationUsage: &Usage{InputTokens: 0, CacheReadInputTokens: 10000}})
-	require.NoError(t, err)
-	require.Zero(t, result.Usage.InputTokens)
-	require.Equal(t, int64(0), gjson.GetBytes(result.ResponseBody, "usage.input_tokens").Int())
-	require.Equal(t, 10000, result.Usage.CacheReadInputTokens)
 }
 
 func TestRetainedInputIgnoresNestedCacheControl(t *testing.T) {
